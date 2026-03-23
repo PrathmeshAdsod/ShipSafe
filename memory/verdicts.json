@@ -1,0 +1,23 @@
+{
+  "auth/jwt.ts": {
+    "verdicts": [
+      {
+        "outcome": "REQUEST_CHANGES",
+        "summary": "Missing null check on token sub claim at jwt.ts:31 — null sub would cause unhandled exception",
+        "timestamp": "2026-03-10T09:00:00Z",
+        "mr_iid": 23,
+        "key_findings": [
+          "Missing null check on sub claim",
+          "No error handling on malformed token"
+        ]
+      },
+      {
+        "outcome": "APPROVED",
+        "summary": "Null check added at jwt.ts:31 — prior concern addressed",
+        "timestamp": "2026-03-12T14:00:00Z",
+        "mr_iid": 31,
+        "key_findings": []
+      }
+    ]
+  }
+}

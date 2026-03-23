@@ -1,0 +1,166 @@
+version: "v1"
+environment: ambient
+components:
+  - name: announce_release
+    type: DeterministicStepComponent
+    tool_name: create_issue_note
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:issue_id"
+        as: "issue_iid"
+      - from: "ShipSafe is challenging this release now.\n\nRecent commits, open high-priority issues, and verdict memory are being reviewed."
+        as: "body"
+        literal: true
+  - name: release_summary
+    type: AgentComponent
+    prompt_id: shipsafe_release_summary
+    inputs:
+      - from: "context:goal"
+        as: "goal"
+    ui_log_events:
+      - "on_agent_final_answer"
+  - name: release_risk
+    type: AgentComponent
+    prompt_id: shipsafe_release_risk
+    inputs:
+      - from: "context:goal"
+        as: "goal"
+    ui_log_events:
+      - "on_agent_final_answer"
+  - name: release_arbiter
+    type: AgentComponent
+    prompt_id: shipsafe_release_pragmatist
+    inputs:
+      - from: "context:goal"
+        as: "goal"
+      - from: "context:release_summary.final_answer"
+        as: "summary_output"
+      - from: "context:release_risk.final_answer"
+        as: "risk_output"
+    ui_log_events:
+      - "on_agent_final_answer"
+  - name: note_builder
+    type: AgentComponent
+    prompt_id: shipsafe_release_note_builder
+    inputs:
+      - from: "context:release_arbiter.final_answer"
+        as: "verdict_json"
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:issue_id"
+        as: "issue_iid"
+      - from: "context:goal"
+        as: "goal"
+    ui_log_events:
+      - "on_agent_final_answer"
+  - name: post_release_note
+    type: DeterministicStepComponent
+    tool_name: create_issue_note
+    inputs:
+      - from: "context:project_id"
+        as: "project_id"
+      - from: "context:issue_id"
+        as: "issue_iid"
+      - from: "context:note_builder.final_answer"
+        as: "body"
+prompts:
+  - prompt_id: shipsafe_release_summary
+    name: ShipSafe Release Summary
+    unit_primitives: []
+    prompt_template:
+      system: |
+        Summarize the strongest evidence that this release is safe.
+        Respond with valid JSON only. No markdown fences. No prose before or after.
+        {
+          "position": "GO",
+          "confidence": 0,
+          "release_notes": "markdown release notes",
+          "positives": []
+        }
+      user: "{{goal}}"
+  - prompt_id: shipsafe_release_risk
+    name: ShipSafe Release Risk
+    unit_primitives: []
+    prompt_template:
+      system: |
+        Summarize the strongest evidence that this release should not ship.
+        Respond with valid JSON only. No markdown fences. No prose before or after.
+        {
+          "position": "NO_GO",
+          "confidence": 0,
+          "blockers": [],
+          "summary": "2-3 sentences"
+        }
+      user: "{{goal}}"
+  - prompt_id: shipsafe_release_pragmatist
+    name: ShipSafe Release Pragmatist
+    unit_primitives: []
+    prompt_template:
+      system: |
+        Evaluate the release summary and risk outputs and decide GO or NO_GO.
+        Respond with valid JSON only. No markdown fences. No prose before or after.
+        {
+          "outcome": "GO|NO_GO",
+          "confidence": 0,
+          "summary": "2-3 sentences",
+          "release_notes": "markdown release notes",
+          "blockers": []
+        }
+      user: |
+        Release context:
+        {{goal}}
+
+        Summary output:
+        {{summary_output}}
+
+        Risk output:
+        {{risk_output}}
+  - prompt_id: shipsafe_release_note_builder
+    name: ShipSafe Release Note Builder
+    unit_primitives: []
+    prompt_template:
+      system: |
+        Convert the verdict JSON into a short markdown note for the release control issue.
+        Keep the note concise and outcome-focused so maintainers can see whether the release is safe or blocked.
+        Do not use markdown fences. Do not add prose before or after the final note.
+        End the note with exactly one hidden HTML comment:
+        <!-- shipsafe-verdict:v1:{...json...} -->
+        Inside that hidden comment, embed this exact raw JSON envelope:
+        {
+          "kind": "release",
+          "event": {
+            "project_id": <project_id>,
+            "issue_iid": <issue_iid>,
+            "release_tag": "<exact tag when known>"
+          },
+          "verdict": <the parsed verdict_json object exactly as provided>
+        }
+        Read the exact release tag from the goal line that starts with "Tag:" when it is present.
+        If you cannot determine the release tag exactly, omit release_tag instead of guessing.
+        Preserve every verdict_json key, string, boolean, array, and nested object exactly.
+        Return only the final markdown note.
+      user: |
+        project_id: {{project_id}}
+        issue_iid: {{issue_iid}}
+
+        goal:
+        {{goal}}
+
+        verdict_json:
+        {{verdict_json}}
+routers:
+  - from: "announce_release"
+    to: "release_summary"
+  - from: "release_summary"
+    to: "release_risk"
+  - from: "release_risk"
+    to: "release_arbiter"
+  - from: "release_arbiter"
+    to: "note_builder"
+  - from: "note_builder"
+    to: "post_release_note"
+  - from: "post_release_note"
+    to: "end"
+flow:
+  entry_point: "announce_release"

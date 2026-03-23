@@ -1,0 +1,206 @@
+name: "ShipSafe MR Review"
+description: "ShipSafe flow for merge request review, blocking, and auto-fix decisions"
+public: true
+definition:
+  version: "v1"
+  environment: ambient
+  components:
+    - name: announce_review
+      type: DeterministicStepComponent
+      tool_name: create_merge_request_note
+      inputs:
+        - from: "context:project_id"
+          as: "project_id"
+        - from: "context:merge_request_id"
+          as: "merge_request_iid"
+        - from: "ShipSafe is reviewing this merge request now.\n\nBad code is being checked for real blockers, issue creation, and auto-fix eligibility."
+          as: "body"
+          literal: true
+    - name: defender
+      type: AgentComponent
+      prompt_id: shipsafe_mr_defender
+      inputs:
+        - from: "context:goal"
+          as: "goal"
+      ui_log_events:
+        - "on_agent_final_answer"
+    - name: skeptic
+      type: AgentComponent
+      prompt_id: shipsafe_mr_skeptic
+      inputs:
+        - from: "context:goal"
+          as: "goal"
+      ui_log_events:
+        - "on_agent_final_answer"
+    - name: pragmatist
+      type: AgentComponent
+      prompt_id: shipsafe_mr_pragmatist
+      inputs:
+        - from: "context:goal"
+          as: "goal"
+        - from: "context:defender.final_answer"
+          as: "defender_output"
+        - from: "context:skeptic.final_answer"
+          as: "skeptic_output"
+      ui_log_events:
+        - "on_agent_final_answer"
+    - name: note_builder
+      type: AgentComponent
+      prompt_id: shipsafe_mr_note_builder
+      inputs:
+        - from: "context:pragmatist.final_answer"
+          as: "verdict_json"
+        - from: "context:project_id"
+          as: "project_id"
+        - from: "context:merge_request_id"
+          as: "merge_request_iid"
+      ui_log_events:
+        - "on_agent_final_answer"
+    - name: post_verdict_note
+      type: DeterministicStepComponent
+      tool_name: create_merge_request_note
+      inputs:
+        - from: "context:project_id"
+          as: "project_id"
+        - from: "context:merge_request_id"
+          as: "merge_request_iid"
+        - from: "context:note_builder.final_answer"
+          as: "body"
+  prompts:
+    - prompt_id: shipsafe_mr_defender
+      name: ShipSafe MR Defender
+      unit_primitives: []
+      prompt_template:
+        system: |
+          You are ShipSafe's Defender role.
+          Build the strongest honest case that this merge request is safe to merge.
+          Respond with valid JSON only. No markdown fences. No prose before or after.
+          {
+            "position": "APPROVE",
+            "confidence": 0,
+            "arguments": [
+              {
+                "strength": "HIGH|MEDIUM|LOW",
+                "claim": "specific claim",
+                "evidence": "path:line or exact pattern"
+              }
+            ],
+            "acknowledged_risks": [],
+            "suggested_tests": [],
+            "overall_assessment": "2-3 sentences"
+          }
+        user: "{{goal}}"
+    - prompt_id: shipsafe_mr_skeptic
+      name: ShipSafe MR Skeptic
+      unit_primitives: []
+      prompt_template:
+        system: |
+          You are ShipSafe's Skeptic role.
+          Find every real reason this merge request should not merge.
+          Respond with valid JSON only. No markdown fences. No prose before or after.
+          {
+            "position": "BLOCK|REQUEST_CHANGES",
+            "confidence": 0,
+            "findings": [
+              {
+                "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+                "type": "SECURITY|LOGIC|CONCURRENCY|RELIABILITY|PERFORMANCE|ARCHITECTURE|COVERAGE",
+                "location": "path:line",
+                "description": "specific production risk",
+                "exploit_scenario": "required for security findings",
+                "fix_complexity": "LOW|MEDIUM|HIGH|ARCHITECTURAL",
+                "suggested_fix": "required for LOW or MEDIUM"
+              }
+            ],
+            "pattern_concern": false,
+            "systemic": false,
+            "overall_assessment": "2-3 sentences"
+          }
+        user: "{{goal}}"
+    - prompt_id: shipsafe_mr_pragmatist
+      name: ShipSafe MR Pragmatist
+      unit_primitives: []
+      prompt_template:
+        system: |
+          You are ShipSafe's Pragmatist role.
+          Evaluate the Defender and Skeptic outputs, accept only arguments grounded in the code context, and produce the final machine-readable verdict.
+          Respond with valid JSON only. No markdown fences. No prose before or after.
+          {
+            "outcome": "APPROVED|APPROVED_WITH_NOTES|REQUEST_CHANGES|BLOCKED_FIX_AVAILABLE|BLOCKED_ARCHITECTURAL",
+            "confidence": 0,
+            "accepted_findings": [],
+            "rejected_findings": [{"finding": "text", "reason": "text"}],
+            "accepted_arguments": [],
+            "rejected_arguments": [{"argument": "text", "reason": "text"}],
+            "summary": "3-4 sentences",
+            "fix_description": "required if generate_fix_mr is true",
+            "fix_code_changes": [
+              {
+                "file_path": "path/to/file.ts",
+                "old_content": "exact old text",
+                "new_content": "exact new text"
+              }
+            ],
+            "actions": {
+              "block_mr": true,
+              "auto_approve": false,
+              "create_issue": true,
+              "issue_severity": "critical|high|medium|low",
+              "generate_fix_mr": false,
+              "scan_codebase": false,
+              "create_epic": false,
+              "auto_merge": false,
+              "assignee_hint": "code-owner|mr-author|team-lead"
+            }
+          }
+        user: |
+          Merge request context:
+          {{goal}}
+  
+          Defender output:
+          {{defender_output}}
+  
+          Skeptic output:
+          {{skeptic_output}}
+    - prompt_id: shipsafe_mr_note_builder
+      name: ShipSafe MR Note Builder
+      unit_primitives: []
+      prompt_template:
+        system: |
+          Convert the verdict JSON you receive into a short markdown note for a merge request.
+          Keep the note concise and outcome-focused: bad code detected, blocked, and fixed automatically when applicable.
+          Do not use markdown fences. Do not add prose before or after the final note.
+          End the note with exactly one hidden HTML comment in this format:
+          <!-- shipsafe-verdict:v1:{...json...} -->
+          Inside that hidden comment, embed this exact raw JSON envelope:
+          {
+            "kind": "mr",
+            "event": {
+              "project_id": <project_id>,
+              "mr_iid": <merge_request_iid>
+            },
+            "verdict": <the parsed verdict_json object exactly as provided>
+          }
+          Preserve every verdict_json key, string, boolean, array, and nested object exactly.
+          Return only the final markdown note.
+        user: |
+          project_id: {{project_id}}
+          merge_request_iid: {{merge_request_iid}}
+  
+          verdict_json:
+          {{verdict_json}}
+  routers:
+    - from: "announce_review"
+      to: "defender"
+    - from: "defender"
+      to: "skeptic"
+    - from: "skeptic"
+      to: "pragmatist"
+    - from: "pragmatist"
+      to: "note_builder"
+    - from: "note_builder"
+      to: "post_verdict_note"
+    - from: "post_verdict_note"
+      to: "end"
+  flow:
+    entry_point: "announce_review"
